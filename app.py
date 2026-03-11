@@ -1,224 +1,1081 @@
-import streamlit as st
-import cv2
-import mediapipe as mp
-import numpy as np
-import plotly.graph_objects as go
-from PIL import Image
-import math
-import hashlib
-import pandas as pd
-import streamlit.components.v1 as components # 인쇄 버튼용 부품 추가
+import { useState, useRef, useCallback } from "react";
 
-# --- 1. 기본 설정 및 모바일/인쇄 최적화 CSS ---
-st.set_page_config(page_title="Biometric VIP Report", layout="centered", initial_sidebar_state="collapsed")
+const API_URL = "https://api.anthropic.com/v1/messages";
 
-custom_css = """
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;700;900&display=swap');
-    html, body, [class*="css"] { font-family: 'Noto Sans KR', sans-serif; color: #111; }
-    .report-header { border-top: 4px solid #000; border-bottom: 2px solid #000; padding: 15px 0; margin-bottom: 15px; text-align: center;}
-    .report-title { font-weight: 900; font-size: 20px; margin: 0; }
-    .metric-row { display: flex; justify-content: space-between; border-bottom: 1px dashed #ccc; padding: 10px 0; font-size: 14px; }
-    .highlight-box { background-color: #f8f9fa; border-left: 4px solid #000; padding: 15px; margin-top: 15px; font-size: 14px; line-height: 1.6; }
-    .login-box { border: 1px solid #ddd; padding: 20px; border-radius: 10px; background-color: #fafafa; margin-top: 20px; }
-    .stTabs [data-baseweb="tab-list"] { gap: 8px; }
-    .stTabs [data-baseweb="tab"] { font-weight: bold; padding: 10px 15px; }
-    .guide-box { background-color: #e8f0fe; border-left: 4px solid #4285f4; padding: 10px; margin-bottom: 15px; font-size: 13px; color: #333; }
-    
-    /* 🖨️ 인쇄 시 불필요한 버튼과 카메라 화면 숨기기 */
-    @media print {
-        header, .stCamera, .stFileUploader, button, .guide-box, iframe { display: none !important; }
-        @page { size: A4 portrait; margin: 15mm; }
-        body { background-color: white !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
-        * { color: black !important; }
-        .highlight-box { border: 1px solid #ccc !important; border-left: 4px solid #000 !important; }
+const ANALYSIS_PROMPT = `You are a specialized AI facial analysis system used in a professional plastic surgery clinic. Analyze the uploaded face image based on peer-reviewed research in social psychology and facial perception.
+
+Analyze the face according to these research-based frameworks:
+
+1. **Willis & Todorov (2006) - First Impressions**: Assess trustworthiness, competence, attractiveness scored in 100ms
+2. **Oosterhof & Todorov (2008) - Two Pillars**: Score on two primary axes:
+   - Trustworthiness/Approachability (mouth shape, corner lift)
+   - Dominance (jaw width, brow prominence)
+3. **Sutherland et al. (2013) - 3D Model**: Score on three dimensions:
+   - Approachability
+   - Dominance  
+   - Youthful-Attractiveness
+4. **Zebrowitz (1997) - Babyface Theory**: Babyface index (eye size ratio, chin position, overall childlike features)
+5. **Vernon et al. (2014) - 65 Coordinates**: Physical measurements including:
+   - Eye distance ratio (ideal: ~46% of face width)
+   - Eye-to-mouth ratio (ideal: ~36% of face length)
+   - Mouth shape and corner angles
+   - Jaw width to face width ratio
+   - Eyebrow height and density
+   - Lip thickness upper/lower ratio
+   - Facial symmetry score
+   - Nose-to-face proportion
+6. **Pallett et al. (2010) - Golden Ratios**:
+   - Vertical: eye-to-mouth distance / total face length (ideal: 36%)
+   - Horizontal: inter-eye distance / face width (ideal: 46%)
+   - Overall facial harmony score
+
+For each measurement, provide:
+- Estimated current value (as %)
+- Ideal reference value (as %)
+- Deviation score
+- Clinical recommendation for filler injection if applicable
+
+Also identify the TOP 3 areas where dermal filler could most effectively improve facial harmony and first impressions, with specific product type recommendations (hyaluronic acid, calcium hydroxyapatite, etc.) and injection volumes.
+
+Return ONLY valid JSON in this exact format, no other text:
+{
+  "patientSummary": {
+    "overallScore": 78,
+    "faceShape": "Oval",
+    "skinTone": "Medium",
+    "ageEstimate": "28-33",
+    "gender": "Female"
+  },
+  "impressionScores": {
+    "trustworthiness": 72,
+    "dominance": 45,
+    "youthfulAttractiveness": 68,
+    "competence": 74,
+    "approachability": 70
+  },
+  "babyfaceIndex": {
+    "score": 42,
+    "level": "Low",
+    "description": "Angular facial features with defined jawline. Lower babyface index suggests a more assertive, dominant impression."
+  },
+  "goldenRatios": {
+    "verticalRatio": {
+      "current": 33.2,
+      "ideal": 36.0,
+      "deviation": -2.8,
+      "grade": "B"
+    },
+    "horizontalRatio": {
+      "current": 44.1,
+      "ideal": 46.0,
+      "deviation": -1.9,
+      "grade": "B+"
+    },
+    "facialSymmetry": {
+      "current": 87,
+      "ideal": 95,
+      "deviation": -8,
+      "grade": "B"
     }
-</style>
-"""
-st.markdown(custom_css, unsafe_allow_html=True)
-
-# ⭐️ [매우 중요] 아래 따옴표 안에 본인의 구글 시트 CSV 링크를 붙여넣으세요!
-SHEET_URL = 'https://docs.google.com/spreadsheets/d/e/2PACX-1vS_PWLBFxD2ceR3l2SjyL1iNECdQ2i72TxyT39D7_YBCsvDIXK5zQteTqfRs1c6z451ZvbbzCMLrQnh/pub?output=csv'
-
-# --- 2. 코어 수학 및 분석 로직 ---
-@st.cache_data(ttl=60)
-def load_allowed_users(url):
-    try:
-        return pd.read_csv(url)
-    except:
-        return None
-
-def calc_3d_dist(p1, p2, w, h):
-    dx, dy, dz = (p1.x - p2.x) * w, (p1.y - p2.y) * h, (p1.z - p2.z) * w 
-    return math.sqrt(dx**2 + dy**2 + dz**2)
-
-def analyze_face(image_array):
-    mp_face_mesh = mp.solutions.face_mesh
-    face_mesh = mp_face_mesh.FaceMesh(static_image_mode=True, max_num_faces=1, refine_landmarks=True)
-    h, w, _ = image_array.shape
-    results = face_mesh.process(image_array)
-    
-    if not results.multi_face_landmarks:
-        return None, None, "❌ 얼굴을 인식하지 못했습니다. 머리카락이 눈이나 턱을 가리지 않게 해주세요."
-        
-    landmarks = results.multi_face_landmarks[0].landmark
-    l_zygoma, r_zygoma = landmarks[234], landmarks[454]
-    trichion, gnathion = landmarks[10], landmarks[152]
-    nasion, stomion = landmarks[168], landmarks[13]
-    l_pupil, r_pupil = landmarks[468], landmarks[473]
-    pronasale = landmarks[1]
-
-    dx = (r_pupil.x - l_pupil.x) * w
-    dy = (r_pupil.y - l_pupil.y) * h
-    tilt_angle = abs(math.degrees(math.atan2(dy, dx)))
-    
-    if tilt_angle > 8.0: 
-        return None, None, f"⚠️ 고개가 너무 많이 꺾였습니다 ({tilt_angle:.1f}도). 갸우뚱하지 않게 정면을 봐주세요!"
-
-    face_width = calc_3d_dist(l_zygoma, r_zygoma, w, h)
-    face_height = calc_3d_dist(trichion, gnathion, w, h)
-    upper_face_height = calc_3d_dist(nasion, stomion, w, h)
-    
-    fwhr = face_width / upper_face_height if upper_face_height > 0 else 0
-    ip_index = (calc_3d_dist(l_pupil, r_pupil, w, h) / face_width) * 100 
-    mf_index = (calc_3d_dist(nasion, stomion, w, h) / face_height) * 100 
-    
-    sym_diff = abs(calc_3d_dist(pronasale, l_zygoma, w, h) - calc_3d_dist(pronasale, r_zygoma, w, h)) / face_width * 100
-    jaw_ratio = (calc_3d_dist(landmarks[132], landmarks[361], w, h) / face_width) * 100 
-    
-    sym_score = min(max(100 - (sym_diff * 12), 0), 100)
-    baby_score = min(max(100 - (mf_index - 32) * 8, 0), 100) 
-    dom_score = min(max((fwhr - 1.6) * 55 + 40, 0), 100) 
-    trust_score = min(max((sym_score * 0.5) + (baby_score * 0.3) + 20, 0), 100) 
-    ext_score = min(max((fwhr - 1.5) * 35 + trust_score * 0.2, 0), 100)
-    comp_score = min(max(((100 - baby_score) * 0.4) + (sym_score * 0.4) + (dom_score * 0.2), 0), 100)
-    
-    bio_hash = hashlib.sha256(f"{pronasale.x}{l_zygoma.x}".encode('utf-8')).hexdigest()[:8].upper()
-    
-    metrics = {
-        "hash": bio_hash, "fwhr": fwhr, "ip_index": ip_index, "mf_index": mf_index, "jaw_ratio": jaw_ratio,
-        "scores": {"Trust": trust_score, "Competence": comp_score, "Dominance": dom_score, "Extravers": ext_score, "Neoteny": baby_score, "Symmetry": sym_score}
+  },
+  "vernonMeasurements": [
+    {
+      "name": "Eye Distance Ratio",
+      "nameKo": "눈간격 비율",
+      "current": 44.1,
+      "ideal": 46.0,
+      "unit": "%",
+      "grade": "B+",
+      "fillerArea": "Nasal bridge",
+      "fillerAreaKo": "코 브릿지"
+    },
+    {
+      "name": "Eye-to-Mouth Ratio",
+      "nameKo": "눈-입 비율",
+      "current": 33.2,
+      "ideal": 36.0,
+      "unit": "%",
+      "grade": "B",
+      "fillerArea": "Chin projection",
+      "fillerAreaKo": "턱 돌출"
+    },
+    {
+      "name": "Mouth Corner Angle",
+      "nameKo": "입꼬리 각도",
+      "current": -3,
+      "ideal": 2,
+      "unit": "°",
+      "grade": "C+",
+      "fillerArea": "Oral commissure",
+      "fillerAreaKo": "입꼬리 리프트"
+    },
+    {
+      "name": "Jaw Width Ratio",
+      "nameKo": "턱 너비 비율",
+      "current": 68,
+      "ideal": 65,
+      "unit": "%",
+      "grade": "A-",
+      "fillerArea": null,
+      "fillerAreaKo": null
+    },
+    {
+      "name": "Lip Volume Ratio",
+      "nameKo": "상하 입술 비율",
+      "current": 1.1,
+      "ideal": 1.6,
+      "unit": "ratio",
+      "grade": "C",
+      "fillerArea": "Upper lip",
+      "fillerAreaKo": "윗입술 볼륨"
+    },
+    {
+      "name": "Facial Symmetry",
+      "nameKo": "안면 대칭도",
+      "current": 87,
+      "ideal": 95,
+      "unit": "%",
+      "grade": "B"
     }
-    
-    img_draw = image_array.copy()
-    thickness = max(int(w / 400), 2)
-    cv2.line(img_draw, (int(l_pupil.x*w), int(l_pupil.y*h)), (int(r_pupil.x*w), int(r_pupil.y*h)), (255,255,255), thickness)
-    cv2.rectangle(img_draw, (int(l_zygoma.x*w), int(nasion.y*h)), (int(r_zygoma.x*w), int(stomion.y*h)), (255,255,255), thickness)
+  ],
+  "fillerRecommendations": [
+    {
+      "rank": 1,
+      "area": "Oral Commissure (Mouth Corners)",
+      "areaKo": "입꼬리 리프트",
+      "impact": "Trustworthiness +15pts",
+      "impactKo": "신뢰성 +15점 향상",
+      "product": "Hyaluronic Acid (Soft)",
+      "productKo": "히알루론산 (소프트)",
+      "volume": "0.3-0.5ml",
+      "priority": "High",
+      "rationale": "Mouth corner angle is the primary determinant of trustworthiness perception (Oosterhof & Todorov, 2008). Upward correction by 5° significantly improves approachability scores.",
+      "rationaleKo": "입꼬리 각도는 신뢰성 인상의 핵심 결정 요소입니다 (Oosterhof & Todorov, 2008). 5° 상향 교정으로 접근성 점수가 크게 향상됩니다."
+    },
+    {
+      "rank": 2,
+      "area": "Upper Lip Volume",
+      "areaKo": "윗입술 볼륨",
+      "impact": "Youthful-Attractiveness +12pts",
+      "impactKo": "젊음-매력 +12점 향상",
+      "product": "Hyaluronic Acid (Medium)",
+      "productKo": "히알루론산 (미디엄)",
+      "volume": "0.5-0.8ml",
+      "priority": "High",
+      "rationale": "Upper-to-lower lip ratio of 1:1.6 is optimal for youthful attractiveness. Current ratio shows upper lip deficiency.",
+      "rationaleKo": "상하 입술 1:1.6 비율이 젊음-매력의 최적값입니다. 현재 윗입술 볼륨 보강이 필요합니다."
+    },
+    {
+      "rank": 3,
+      "area": "Chin Projection",
+      "areaKo": "턱끝 프로젝션",
+      "impact": "Golden Ratio +8pts",
+      "impactKo": "황금비율 +8점 향상",
+      "product": "Hyaluronic Acid (Firm) / CaHA",
+      "productKo": "히알루론산 (펌) / 칼슘 히드록시아파타이트",
+      "volume": "0.5-1.0ml",
+      "priority": "Medium",
+      "rationale": "Chin projection improvement will optimize the vertical golden ratio (eye-to-mouth distance), bringing it closer to the ideal 36%.",
+      "rationaleKo": "턱끝 보강으로 수직 황금비율(눈-입 거리)을 이상적인 36%에 근접시킬 수 있습니다."
+    }
+  ],
+  "researchInsights": [
+    {
+      "study": "Willis & Todorov (2006)",
+      "finding": "First impressions form in 100ms. Trustworthiness is evaluated fastest.",
+      "findingKo": "첫인상은 0.1초에 형성됩니다. 신뢰성이 가장 빠르게 판단됩니다.",
+      "relevance": "Mouth corner correction will have immediate impact on first impression trustworthiness scores."
+    },
+    {
+      "study": "Pallett et al. (2010)",
+      "finding": "Optimal facial proportions: 36% vertical, 46% horizontal ratios.",
+      "findingKo": "최적 안면 비율: 수직 36%, 수평 46%",
+      "relevance": "Current ratios fall slightly below optimal, addressable through targeted filler placement."
+    }
+  ]
+}`;
 
-    return img_draw, metrics, None
+// Grade colors
+const gradeColor = (grade) => {
+  if (!grade) return "#94a3b8";
+  const g = grade.charAt(0);
+  if (g === "S") return "#7c3aed";
+  if (g === "A") return "#0ea5e9";
+  if (g === "B") return "#10b981";
+  if (g === "C") return "#f59e0b";
+  if (g === "D") return "#ef4444";
+  return "#94a3b8";
+};
 
-# --- 3. 이메일 로그인 시스템 ---
-if "access_granted" not in st.session_state:
-    st.session_state["access_granted"] = False
+const gradeBar = (score) => {
+  if (score >= 90) return "S";
+  if (score >= 80) return "A";
+  if (score >= 70) return "B";
+  if (score >= 60) return "C";
+  return "D";
+};
 
-if not st.session_state["access_granted"]:
-    st.markdown('<div class="report-header"><p class="report-title">🔒 CLINICAL AI LOGIN</p></div>', unsafe_allow_html=True)
-    
-    st.markdown('<div class="login-box">', unsafe_allow_html=True)
-    user_email = st.text_input("📧 이메일 (Email):", placeholder="example@email.com")
-    user_pw = st.text_input("🔑 비밀번호 (Password):", type="password", placeholder="비밀번호 입력")
-    
-    if st.button("로그인", use_container_width=True):
-        if '여기에_구글시트_CSV_링크를_붙여넣으세요' in SHEET_URL or 'docs.google.com' not in SHEET_URL:
-            st.error("⚠️ 코드 35번째 줄의 SHEET_URL을 구글 시트 주소로 변경해주세요!")
-        elif not user_email or not user_pw:
-            st.warning("⚠️ 이메일과 비밀번호를 모두 입력해 주세요.")
-        else:
-            df_users = load_allowed_users(SHEET_URL)
-            if df_users is not None:
-                df_users['Email'] = df_users['Email'].astype(str).str.strip()
-                df_users['Password'] = df_users['Password'].astype(str).str.strip()
-                match = df_users[(df_users['Email'] == str(user_email).strip()) & (df_users['Password'] == str(user_pw).strip())]
-                
-                if not match.empty:
-                    st.session_state["access_granted"] = True
-                    st.session_state["user_name"] = match.iloc[0]['Name']
-                    st.rerun()
-                else:
-                    st.error("❌ 이메일 또는 비밀번호가 일치하지 않습니다.")
-            else:
-                st.error("❌ 구글 시트를 불러올 수 없습니다.")
-    st.markdown('</div>', unsafe_allow_html=True)
-    st.stop()
+function ScoreGauge({ score, label, labelKo, color }) {
+  const circumference = 2 * Math.PI * 36;
+  const offset = circumference - (score / 100) * circumference;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 6 }}>
+      <svg width="88" height="88" viewBox="0 0 88 88">
+        <circle cx="44" cy="44" r="36" fill="none" stroke="#1e293b" strokeWidth="7" />
+        <circle
+          cx="44" cy="44" r="36" fill="none"
+          stroke={color} strokeWidth="7"
+          strokeDasharray={circumference}
+          strokeDashoffset={offset}
+          strokeLinecap="round"
+          transform="rotate(-90 44 44)"
+          style={{ transition: "stroke-dashoffset 1.2s cubic-bezier(0.4,0,0.2,1)" }}
+        />
+        <text x="44" y="48" textAnchor="middle" fill="white" fontSize="17" fontWeight="700" fontFamily="'DM Mono', monospace">{score}</text>
+      </svg>
+      <div style={{ textAlign: "center" }}>
+        <div style={{ color: "#94a3b8", fontSize: 10, letterSpacing: "0.08em", textTransform: "uppercase" }}>{label}</div>
+        <div style={{ color: "#cbd5e1", fontSize: 11, marginTop: 1 }}>{labelKo}</div>
+      </div>
+    </div>
+  );
+}
 
-# --- 4. 메인 대시보드 ---
-col1, col2 = st.columns([7, 3])
-with col1:
-    st.markdown(f'<div style="font-weight:900; font-size:18px; margin-top:10px;">👤 {st.session_state["user_name"]} 님의 리포트</div>', unsafe_allow_html=True)
-with col2:
-    if st.button("로그아웃", use_container_width=True):
-        st.session_state["access_granted"] = False
-        st.rerun()
+function MeasurementBar({ item }) {
+  const deviation = item.current - item.ideal;
+  const absMax = Math.max(Math.abs(deviation) * 2.5, 10);
+  const pct = Math.min(100, (item.current / (item.ideal * 1.5)) * 100);
+  const idealPct = (item.ideal / (item.ideal * 1.5)) * 100;
+  const gc = gradeColor(item.grade);
 
-st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
-
-st.markdown("""
-<div class="guide-box">
-    📸 <b>촬영 가이드 (AI 자동 보정 켜짐)</b><br>
-    • 스마트폰 렌즈가 눈높이와 <b>일직선</b>이 되게 들어주세요.<br>
-    • 카메라 화면의 <b>중앙에 얼굴이 가득 차도록</b> 맞춰주세요.<br>
-    • 약간 삐뚤어져도 3D AI가 알아서 보정합니다! 편하게 찍으세요.
-</div>
-""", unsafe_allow_html=True)
-
-camera_photo = st.camera_input("📷 모바일 정면 카메라")
-uploaded_file = st.file_uploader("📂 갤러리에서 업로드", type=["jpg", "jpeg", "png"])
-image_source = camera_photo if camera_photo else uploaded_file
-
-if image_source is not None:
-    image = Image.open(image_source).convert('RGB')
-    image_np = np.array(image)
-    
-    with st.spinner("AI 3D 랜드마크 분석 중..."):
-        annotated_img, metrics, error_msg = analyze_face(image_np)
-    
-    if error_msg:
-        st.error(error_msg)
-    elif metrics:
-        
-        # 🖨️ [새로 추가됨] 인쇄 버튼!
-        components.html("""
-        <div style="text-align: right; margin-bottom: 10px;">
-            <button onclick="window.print()" style="padding: 10px 20px; background-color: #111; color: white; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; box-shadow: 0px 4px 6px rgba(0,0,0,0.1);">
-                🖨️ A4 리포트 인쇄 / PDF 저장
-            </button>
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+        <div>
+          <span style={{ color: "#e2e8f0", fontSize: 13, fontWeight: 600 }}>{item.nameKo}</span>
+          <span style={{ color: "#64748b", fontSize: 11, marginLeft: 6 }}>{item.name}</span>
         </div>
-        """, height=55)
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ color: "#94a3b8", fontSize: 12 }}>
+            현재 <span style={{ color: "#e2e8f0", fontWeight: 700, fontFamily: "'DM Mono', monospace" }}>{item.current}{item.unit}</span>
+            {" / "}이상 <span style={{ color: "#60a5fa", fontWeight: 600, fontFamily: "'DM Mono', monospace" }}>{item.ideal}{item.unit}</span>
+          </span>
+          <span style={{
+            background: gc + "22",
+            color: gc,
+            border: `1px solid ${gc}44`,
+            borderRadius: 4,
+            padding: "1px 7px",
+            fontSize: 12,
+            fontWeight: 700,
+            fontFamily: "'DM Mono', monospace",
+            minWidth: 28,
+            textAlign: "center"
+          }}>{item.grade}</span>
+        </div>
+      </div>
+      <div style={{ position: "relative", height: 8, background: "#1e293b", borderRadius: 4, overflow: "visible" }}>
+        <div style={{
+          height: "100%",
+          width: `${pct}%`,
+          background: `linear-gradient(90deg, ${gc}88, ${gc})`,
+          borderRadius: 4,
+          transition: "width 1s ease"
+        }} />
+        {/* Ideal marker */}
+        <div style={{
+          position: "absolute",
+          left: `${idealPct}%`,
+          top: -4,
+          width: 2,
+          height: 16,
+          background: "#60a5fa",
+          borderRadius: 1,
+          transform: "translateX(-50%)"
+        }} />
+      </div>
+      {item.fillerAreaKo && (
+        <div style={{ marginTop: 4, display: "flex", alignItems: "center", gap: 4 }}>
+          <span style={{ color: "#f59e0b", fontSize: 10, letterSpacing: "0.06em" }}>▶ 필러 추천 부위:</span>
+          <span style={{ color: "#fbbf24", fontSize: 11, fontWeight: 600 }}>{item.fillerAreaKo}</span>
+        </div>
+      )}
+    </div>
+  );
+}
 
-        tab1, tab2, tab3 = st.tabs(["📊 구조 분석", "🎯 심리 프로필", "📝 종합 평가"])
-        
-        with tab1:
-            st.image(annotated_img, use_container_width=True)
-            st.markdown(f"""
-            <div class="metric-row"><span>BIO-HASH ID</span> <span><b>{metrics['hash']}</b></span></div>
-            <div class="metric-row"><span>fWHR (골격비)</span> <span><b>{metrics['fwhr']:.2f}</b> (표준 1.7-1.9)</span></div>
-            <div class="metric-row"><span>IP Index (수평비)</span> <span><b>{metrics['ip_index']:.1f}%</b> (표준 46.0%)</span></div>
-            <div class="metric-row"><span>Mid-face (수직비)</span> <span><b>{metrics['mf_index']:.1f}%</b> (표준 36.0%)</span></div>
-            """, unsafe_allow_html=True)
-            
-        with tab2:
-            categories = list(metrics['scores'].keys())
-            values = list(metrics['scores'].values())
-            fig = go.Figure()
-            fig.add_trace(go.Scatterpolar(r=values + [values[0]], theta=categories + [categories[0]], fill='toself', line_color='black', fillcolor='rgba(100,100,100,0.3)'))
-            fig.update_layout(polar=dict(radialaxis=dict(visible=True, range=[0, 100])), showlegend=False, margin=dict(l=40, r=40, t=20, b=20))
-            st.plotly_chart(fig, use_container_width=True, config={'staticPlot': True})
-            
-        with tab3:
-            comp, dom, trt = metrics['scores']['Competence'], metrics['scores']['Dominance'], metrics['scores']['Trust']
-            neo = metrics['scores']['Neoteny']
-            
-            eval_html = "<div class='highlight-box'><ul>"
-            if comp > 70 and neo < 50:
-                eval_html += "<li><b>[Professional]:</b> 성숙한 비율과 대칭성이 결합되어 고도의 <b>'유능함(Competence)'</b>을 발산합니다. 일 처리가 뛰어난 전문가의 인상입니다.</li>"
-            elif neo > 70 and trt > 60:
-                eval_html += "<li><b>[Approachable]:</b> 타인의 경계심을 즉각적으로 낮추는 <b>'친화적 아우라'</b>가 돋보입니다. 대중에게 다가가기 쉬운 호감형입니다.</li>"
-            else:
-                eval_html += "<li><b>[Balanced]:</b> 안정적인 비율을 지녔습니다. 튀지 않고 편안한 <b>'신뢰감(Trustworthiness)'</b>을 주는 조화로운 인상입니다.</li>"
-                
-            if dom > 65:
-                eval_html += "<li><b>[Authoritative]:</b> 하악각이 발달하여 공간을 장악하는 <b>'카리스마(Dominance)'</b>가 있습니다. 추진력과 결단력이 필요한 상황에 유리합니다.</li>"
-            else:
-                eval_html += "<li><b>[Egalitarian]:</b> 위압적이기보다 <b>수평적이고 민주적인 소통</b>을 선호하는 사람으로 인식됩니다. 훌륭한 중재자입니다.</li>"
-            eval_html += "</ul></div>"
-            st.markdown(eval_html, unsafe_allow_html=True)
+export default function FaceAnalysisApp() {
+  const [image, setImage] = useState(null);
+  const [imageBase64, setImageBase64] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState(null);
+  const [step, setStep] = useState("upload"); // upload | analyzing | report
+  const fileRef = useRef();
+  const reportRef = useRef();
+
+  const handleFile = useCallback((file) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      setImage(e.target.result);
+      const b64 = e.target.result.split(",")[1];
+      setImageBase64(b64);
+    };
+    reader.readAsDataURL(file);
+  }, []);
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    const file = e.dataTransfer.files[0];
+    if (file && file.type.startsWith("image/")) handleFile(file);
+  };
+
+  const analyze = async () => {
+    if (!imageBase64) return;
+    setLoading(true);
+    setError(null);
+    setStep("analyzing");
+
+    try {
+      const res = await fetch(API_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: "claude-sonnet-4-20250514",
+          max_tokens: 3000,
+          messages: [{
+            role: "user",
+            content: [
+              {
+                type: "image",
+                source: { type: "base64", media_type: "image/jpeg", data: imageBase64 }
+              },
+              { type: "text", text: ANALYSIS_PROMPT }
+            ]
+          }]
+        })
+      });
+
+      const data = await res.json();
+      const text = data.content?.find(c => c.type === "text")?.text || "";
+      const clean = text.replace(/```json|```/g, "").trim();
+      const parsed = JSON.parse(clean);
+      setResult(parsed);
+      setStep("report");
+    } catch (err) {
+      setError("분석 중 오류가 발생했습니다. 다시 시도해주세요.");
+      setStep("upload");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const reset = () => {
+    setImage(null);
+    setImageBase64(null);
+    setResult(null);
+    setError(null);
+    setStep("upload");
+  };
+
+  const priorityColor = (p) => p === "High" ? "#ef4444" : p === "Medium" ? "#f59e0b" : "#10b981";
+  const priorityKo = (p) => p === "High" ? "높음" : p === "Medium" ? "중간" : "낮음";
+
+  return (
+    <div style={{
+      minHeight: "100vh",
+      background: "#060d1a",
+      fontFamily: "'Pretendard', 'Noto Sans KR', 'DM Sans', sans-serif",
+      color: "#e2e8f0",
+      padding: "0 0 60px"
+    }}>
+      {/* Header */}
+      <div style={{
+        background: "linear-gradient(135deg, #0a1628 0%, #0f1f3a 100%)",
+        borderBottom: "1px solid #1e3a5f",
+        padding: "18px 24px",
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "space-between",
+        position: "sticky",
+        top: 0,
+        zIndex: 100
+      }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <div style={{
+            width: 36, height: 36,
+            background: "linear-gradient(135deg, #0ea5e9, #6366f1)",
+            borderRadius: 8,
+            display: "flex", alignItems: "center", justifyContent: "center",
+            fontSize: 18
+          }}>◈</div>
+          <div>
+            <div style={{ fontSize: 14, fontWeight: 800, letterSpacing: "0.04em", color: "#f1f5f9" }}>
+              FACE ANALYSIS SYSTEM
+            </div>
+            <div style={{ fontSize: 10, color: "#60a5fa", letterSpacing: "0.12em" }}>
+              AESTHETIC MEDICINE · AI CONSULTATION
+            </div>
+          </div>
+        </div>
+        <div style={{ fontSize: 10, color: "#334155", letterSpacing: "0.1em" }}>
+          v2.1 · Research-Based
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 680, margin: "0 auto", padding: "0 16px" }}>
+
+        {/* Upload Step */}
+        {step === "upload" && (
+          <div>
+            {/* Hero */}
+            <div style={{ textAlign: "center", padding: "32px 0 20px" }}>
+              <div style={{
+                display: "inline-block",
+                background: "linear-gradient(135deg, #0ea5e922, #6366f122)",
+                border: "1px solid #1e3a5f",
+                borderRadius: 12,
+                padding: "6px 16px",
+                marginBottom: 16,
+                fontSize: 11,
+                color: "#60a5fa",
+                letterSpacing: "0.1em"
+              }}>
+                EVIDENCE-BASED · 6 PEER-REVIEWED STUDIES
+              </div>
+              <h1 style={{
+                fontSize: 26,
+                fontWeight: 900,
+                background: "linear-gradient(135deg, #f1f5f9, #60a5fa)",
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+                margin: "0 0 10px",
+                lineHeight: 1.2
+              }}>
+                안면 황금비율<br />정밀 분석 리포트
+              </h1>
+              <p style={{ color: "#64748b", fontSize: 13, lineHeight: 1.6, maxWidth: 380, margin: "0 auto" }}>
+                6편의 피어리뷰 논문 기반 · 65개 안면 지표 분석<br />
+                필러 시술 부위 AI 컨설팅 제공
+              </p>
+            </div>
+
+            {/* Research badges */}
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, justifyContent: "center", marginBottom: 24 }}>
+              {["Willis & Todorov 2006", "Oosterhof & Todorov 2008", "Sutherland et al. 2013",
+                "Zebrowitz 1997", "Vernon et al. 2014", "Pallett et al. 2010"].map(s => (
+                <span key={s} style={{
+                  background: "#0f1f3a",
+                  border: "1px solid #1e3a5f",
+                  borderRadius: 20,
+                  padding: "3px 10px",
+                  fontSize: 10,
+                  color: "#60a5fa"
+                }}>{s}</span>
+              ))}
+            </div>
+
+            {/* Upload area */}
+            <div
+              onDrop={handleDrop}
+              onDragOver={(e) => e.preventDefault()}
+              onClick={() => !image && fileRef.current.click()}
+              style={{
+                border: image ? "2px solid #0ea5e9" : "2px dashed #1e3a5f",
+                borderRadius: 16,
+                padding: image ? "16px" : "40px 20px",
+                textAlign: "center",
+                cursor: image ? "default" : "pointer",
+                background: image ? "#0a1628" : "linear-gradient(135deg, #0a1628, #0d1f38)",
+                transition: "all 0.3s ease",
+                position: "relative",
+                overflow: "hidden"
+              }}
+            >
+              {image ? (
+                <div>
+                  <img
+                    src={image}
+                    alt="Uploaded face"
+                    style={{
+                      width: "100%",
+                      maxHeight: 360,
+                      objectFit: "contain",
+                      borderRadius: 12,
+                      display: "block"
+                    }}
+                  />
+                  <div style={{ marginTop: 12, display: "flex", gap: 10, justifyContent: "center" }}>
+                    <button
+                      onClick={reset}
+                      style={{
+                        background: "#1e293b",
+                        border: "1px solid #334155",
+                        color: "#94a3b8",
+                        borderRadius: 8,
+                        padding: "10px 20px",
+                        cursor: "pointer",
+                        fontSize: 13
+                      }}
+                    >다시 선택</button>
+                    <button
+                      onClick={analyze}
+                      style={{
+                        background: "linear-gradient(135deg, #0ea5e9, #6366f1)",
+                        border: "none",
+                        color: "white",
+                        borderRadius: 8,
+                        padding: "10px 28px",
+                        cursor: "pointer",
+                        fontSize: 14,
+                        fontWeight: 700,
+                        letterSpacing: "0.04em"
+                      }}
+                    >🔬 분석 시작</button>
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <div style={{ fontSize: 44, marginBottom: 14 }}>📷</div>
+                  <div style={{ color: "#e2e8f0", fontSize: 15, fontWeight: 600, marginBottom: 6 }}>
+                    사진을 업로드하세요
+                  </div>
+                  <div style={{ color: "#475569", fontSize: 12, lineHeight: 1.7 }}>
+                    정면 사진 권장 · JPG/PNG 지원<br />
+                    탭하거나 파일을 여기에 드래그하세요
+                  </div>
+                </div>
+              )}
+            </div>
+            <input
+              ref={fileRef}
+              type="file"
+              accept="image/*"
+              capture="user"
+              style={{ display: "none" }}
+              onChange={(e) => handleFile(e.target.files[0])}
+            />
+
+            {error && (
+              <div style={{
+                marginTop: 12,
+                background: "#450a0a",
+                border: "1px solid #991b1b",
+                borderRadius: 10,
+                padding: "12px 16px",
+                color: "#fca5a5",
+                fontSize: 13
+              }}>{error}</div>
+            )}
+
+            {/* Privacy note */}
+            <div style={{
+              marginTop: 16,
+              background: "#0a1628",
+              border: "1px solid #1e293b",
+              borderRadius: 10,
+              padding: "12px 14px",
+              display: "flex",
+              gap: 8,
+              alignItems: "flex-start"
+            }}>
+              <span style={{ color: "#60a5fa", fontSize: 14, marginTop: 1 }}>🔒</span>
+              <p style={{ color: "#475569", fontSize: 11, lineHeight: 1.6, margin: 0 }}>
+                업로드된 사진은 분석 목적으로만 사용되며 저장되지 않습니다. 
+                본 분석은 전문 의료 상담의 보조 도구로만 활용되어야 합니다.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Analyzing Step */}
+        {step === "analyzing" && (
+          <div style={{ textAlign: "center", padding: "60px 20px" }}>
+            <div style={{ marginBottom: 28 }}>
+              {image && (
+                <img src={image} alt="" style={{
+                  width: 120, height: 120,
+                  objectFit: "cover",
+                  borderRadius: "50%",
+                  border: "3px solid #0ea5e9",
+                  display: "block",
+                  margin: "0 auto 20px"
+                }} />
+              )}
+            </div>
+            <div style={{
+              width: 60, height: 60,
+              margin: "0 auto 24px",
+              border: "4px solid #1e3a5f",
+              borderTop: "4px solid #0ea5e9",
+              borderRadius: "50%",
+              animation: "spin 1s linear infinite"
+            }} />
+            <style>{`
+              @keyframes spin { to { transform: rotate(360deg); } }
+              @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: 0.5 } }
+            `}</style>
+            <div style={{ color: "#e2e8f0", fontSize: 18, fontWeight: 700, marginBottom: 10 }}>
+              AI 분석 중...
+            </div>
+            <div style={{ color: "#475569", fontSize: 13, lineHeight: 1.8 }}>
+              65개 안면 지표 측정 중<br />
+              황금비율 편차 계산 중<br />
+              논문 데이터 대조 중
+            </div>
+          </div>
+        )}
+
+        {/* Report Step */}
+        {step === "report" && result && (
+          <div ref={reportRef}>
+            {/* Report Header */}
+            <div style={{
+              background: "linear-gradient(135deg, #0a1628 0%, #0f1f3a 100%)",
+              border: "1px solid #1e3a5f",
+              borderRadius: "0 0 16px 16px",
+              padding: "20px",
+              marginBottom: 16,
+              display: "flex",
+              alignItems: "center",
+              gap: 16
+            }}>
+              {image && (
+                <img src={image} alt="" style={{
+                  width: 70, height: 70,
+                  objectFit: "cover",
+                  borderRadius: "50%",
+                  border: "2px solid #0ea5e9",
+                  flexShrink: 0
+                }} />
+              )}
+              <div style={{ flex: 1 }}>
+                <div style={{
+                  fontSize: 10,
+                  color: "#60a5fa",
+                  letterSpacing: "0.12em",
+                  marginBottom: 4
+                }}>FACIAL ANALYSIS REPORT</div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  {[
+                    ["얼굴형", result.patientSummary.faceShape],
+                    ["추정 나이", result.patientSummary.ageEstimate],
+                    ["성별", result.patientSummary.gender]
+                  ].map(([k, v]) => (
+                    <div key={k} style={{
+                      background: "#0d1f38",
+                      border: "1px solid #1e3a5f",
+                      borderRadius: 6,
+                      padding: "3px 10px",
+                      fontSize: 11
+                    }}>
+                      <span style={{ color: "#64748b" }}>{k} </span>
+                      <span style={{ color: "#e2e8f0", fontWeight: 600 }}>{v}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+              {/* Overall Score */}
+              <div style={{ textAlign: "center" }}>
+                <div style={{
+                  width: 64, height: 64,
+                  borderRadius: "50%",
+                  background: `conic-gradient(#0ea5e9 ${result.patientSummary.overallScore * 3.6}deg, #1e293b 0deg)`,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  position: "relative"
+                }}>
+                  <div style={{
+                    width: 50, height: 50,
+                    borderRadius: "50%",
+                    background: "#0a1628",
+                    display: "flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    flexDirection: "column"
+                  }}>
+                    <span style={{ fontSize: 18, fontWeight: 800, color: "#0ea5e9", fontFamily: "'DM Mono', monospace", lineHeight: 1 }}>
+                      {result.patientSummary.overallScore}
+                    </span>
+                    <span style={{ fontSize: 9, color: "#60a5fa" }}>/ 100</span>
+                  </div>
+                </div>
+                <div style={{ fontSize: 9, color: "#475569", marginTop: 4 }}>종합점수</div>
+              </div>
+            </div>
+
+            {/* Section: Impression Scores */}
+            <div style={{
+              background: "#0a1628",
+              border: "1px solid #1e3a5f",
+              borderRadius: 14,
+              padding: "18px",
+              marginBottom: 12
+            }}>
+              <div style={{ marginBottom: 16 }}>
+                <span style={{
+                  fontSize: 10,
+                  color: "#60a5fa",
+                  letterSpacing: "0.1em",
+                  fontWeight: 700
+                }}>01 · 인상 5축 평가</span>
+                <div style={{ color: "#475569", fontSize: 11, marginTop: 3 }}>
+                  Willis & Todorov (2006) · Sutherland et al. (2013) 기반
+                </div>
+              </div>
+              <div style={{ display: "flex", justifyContent: "space-around", flexWrap: "wrap", gap: 12 }}>
+                <ScoreGauge score={result.impressionScores.trustworthiness} label="Trustworthiness" labelKo="신뢰성" color="#0ea5e9" />
+                <ScoreGauge score={result.impressionScores.dominance} label="Dominance" labelKo="지배성" color="#8b5cf6" />
+                <ScoreGauge score={result.impressionScores.youthfulAttractiveness} label="Youthful-Attr." labelKo="젊음-매력" color="#10b981" />
+                <ScoreGauge score={result.impressionScores.competence} label="Competence" labelKo="유능함" color="#f59e0b" />
+                <ScoreGauge score={result.impressionScores.approachability} label="Approachability" labelKo="접근성" color="#ec4899" />
+              </div>
+            </div>
+
+            {/* Section: Babyface Index */}
+            <div style={{
+              background: "#0a1628",
+              border: "1px solid #1e3a5f",
+              borderRadius: 14,
+              padding: "18px",
+              marginBottom: 12
+            }}>
+              <div style={{ marginBottom: 12 }}>
+                <span style={{ fontSize: 10, color: "#60a5fa", letterSpacing: "0.1em", fontWeight: 700 }}>
+                  02 · 동안지수 (Babyface Index)
+                </span>
+                <div style={{ color: "#475569", fontSize: 11, marginTop: 3 }}>Zebrowitz (1997) 기반</div>
+              </div>
+              <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                    <span style={{ color: "#94a3b8", fontSize: 12 }}>성숙한 인상</span>
+                    <span style={{ color: "#94a3b8", fontSize: 12 }}>동안 인상</span>
+                  </div>
+                  <div style={{ height: 12, background: "#1e293b", borderRadius: 6, overflow: "hidden" }}>
+                    <div style={{
+                      height: "100%",
+                      width: `${result.babyfaceIndex.score}%`,
+                      background: `linear-gradient(90deg, #6366f1, #ec4899)`,
+                      borderRadius: 6
+                    }} />
+                  </div>
+                  <div style={{ textAlign: "center", marginTop: 6 }}>
+                    <span style={{ fontFamily: "'DM Mono', monospace", fontSize: 20, fontWeight: 700, color: "#f1f5f9" }}>
+                      {result.babyfaceIndex.score}
+                    </span>
+                    <span style={{ color: "#64748b", fontSize: 12 }}> / 100 · {result.babyfaceIndex.level}</span>
+                  </div>
+                </div>
+              </div>
+              <div style={{
+                background: "#0d1f38",
+                border: "1px solid #1e293b",
+                borderRadius: 8,
+                padding: "10px 12px",
+                marginTop: 12,
+                fontSize: 12,
+                color: "#94a3b8",
+                lineHeight: 1.6
+              }}>{result.babyfaceIndex.description}</div>
+            </div>
+
+            {/* Section: Golden Ratios */}
+            <div style={{
+              background: "#0a1628",
+              border: "1px solid #1e3a5f",
+              borderRadius: 14,
+              padding: "18px",
+              marginBottom: 12
+            }}>
+              <div style={{ marginBottom: 16 }}>
+                <span style={{ fontSize: 10, color: "#60a5fa", letterSpacing: "0.1em", fontWeight: 700 }}>
+                  03 · 황금비율 분석
+                </span>
+                <div style={{ color: "#475569", fontSize: 11, marginTop: 3 }}>Pallett et al. (2010) 기반</div>
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                {[
+                  { label: "수직 비율", labelSub: "눈~입 / 얼굴 길이", ...result.goldenRatios.verticalRatio, unit: "%" },
+                  { label: "수평 비율", labelSub: "양눈 거리 / 얼굴 너비", ...result.goldenRatios.horizontalRatio, unit: "%" },
+                  { label: "대칭도", labelSub: "좌우 안면 대칭", ...result.goldenRatios.facialSymmetry, unit: "%" }
+                ].map((item) => {
+                  const gc = gradeColor(item.grade);
+                  const isAbove = item.deviation > 0;
+                  return (
+                    <div key={item.label} style={{
+                      flex: 1,
+                      background: "#0d1f38",
+                      border: `1px solid ${gc}33`,
+                      borderRadius: 12,
+                      padding: "14px 10px",
+                      textAlign: "center"
+                    }}>
+                      <div style={{ color: "#64748b", fontSize: 9, letterSpacing: "0.08em", marginBottom: 6 }}>
+                        {item.label.toUpperCase()}
+                      </div>
+                      <div style={{ fontFamily: "'DM Mono', monospace", fontSize: 22, fontWeight: 700, color: gc, lineHeight: 1 }}>
+                        {item.current}{item.unit}
+                      </div>
+                      <div style={{ color: "#475569", fontSize: 10, margin: "4px 0" }}>
+                        이상값 {item.ideal}{item.unit}
+                      </div>
+                      <div style={{
+                        background: gc + "22",
+                        color: gc,
+                        borderRadius: 4,
+                        padding: "2px 0",
+                        fontSize: 13,
+                        fontWeight: 700,
+                        marginTop: 6
+                      }}>{item.grade}</div>
+                      <div style={{
+                        fontSize: 10,
+                        color: isAbove ? "#10b981" : "#f59e0b",
+                        marginTop: 4,
+                        fontFamily: "'DM Mono', monospace"
+                      }}>
+                        {isAbove ? "+" : ""}{item.deviation}{item.unit}
+                      </div>
+                      <div style={{ color: "#334155", fontSize: 9, marginTop: 6 }}>{item.labelSub}</div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Section: Vernon 65 Measurements */}
+            <div style={{
+              background: "#0a1628",
+              border: "1px solid #1e3a5f",
+              borderRadius: 14,
+              padding: "18px",
+              marginBottom: 12
+            }}>
+              <div style={{ marginBottom: 16 }}>
+                <span style={{ fontSize: 10, color: "#60a5fa", letterSpacing: "0.1em", fontWeight: 700 }}>
+                  04 · 안면 세부 지표 측정
+                </span>
+                <div style={{ color: "#475569", fontSize: 11, marginTop: 3 }}>Vernon et al. (2014) 65-Point Analysis 기반</div>
+              </div>
+              {result.vernonMeasurements.map((item, i) => (
+                <MeasurementBar key={i} item={item} />
+              ))}
+            </div>
+
+            {/* Section: Filler Recommendations */}
+            <div style={{
+              background: "linear-gradient(135deg, #0a1628, #150a24)",
+              border: "1px solid #3b1e5f",
+              borderRadius: 14,
+              padding: "18px",
+              marginBottom: 12
+            }}>
+              <div style={{ marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+                <div>
+                  <span style={{ fontSize: 10, color: "#a78bfa", letterSpacing: "0.1em", fontWeight: 700 }}>
+                    05 · 필러 시술 부위 추천
+                  </span>
+                  <div style={{ color: "#475569", fontSize: 11, marginTop: 3 }}>AI 기반 컨설팅 · 우선순위 순</div>
+                </div>
+                <div style={{
+                  background: "#2d1d4a",
+                  border: "1px solid #4c1d95",
+                  borderRadius: 8,
+                  padding: "4px 10px",
+                  fontSize: 10,
+                  color: "#a78bfa"
+                }}>CLINICAL ADVISORY</div>
+              </div>
+
+              {result.fillerRecommendations.map((rec, i) => (
+                <div key={i} style={{
+                  background: "#0d0d1f",
+                  border: "1px solid #1e1e3a",
+                  borderRadius: 12,
+                  padding: "14px",
+                  marginBottom: 10,
+                  position: "relative",
+                  overflow: "hidden"
+                }}>
+                  <div style={{
+                    position: "absolute",
+                    top: 0, left: 0,
+                    width: 3,
+                    height: "100%",
+                    background: priorityColor(rec.priority)
+                  }} />
+                  <div style={{ paddingLeft: 8 }}>
+                    <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 8 }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                        <span style={{
+                          background: "#1e1e3a",
+                          color: "#a78bfa",
+                          fontFamily: "'DM Mono', monospace",
+                          fontSize: 11,
+                          fontWeight: 700,
+                          padding: "2px 7px",
+                          borderRadius: 4
+                        }}>#{rec.rank}</span>
+                        <div>
+                          <div style={{ color: "#e2e8f0", fontSize: 14, fontWeight: 700 }}>{rec.areaKo}</div>
+                          <div style={{ color: "#64748b", fontSize: 11 }}>{rec.area}</div>
+                        </div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{
+                          background: priorityColor(rec.priority) + "22",
+                          color: priorityColor(rec.priority),
+                          border: `1px solid ${priorityColor(rec.priority)}44`,
+                          borderRadius: 4,
+                          padding: "2px 8px",
+                          fontSize: 10,
+                          fontWeight: 600
+                        }}>우선순위: {priorityKo(rec.priority)}</div>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                      <div style={{
+                        background: "#10b98122",
+                        border: "1px solid #10b98133",
+                        borderRadius: 6,
+                        padding: "4px 10px",
+                        fontSize: 11
+                      }}>
+                        <span style={{ color: "#64748b" }}>기대 효과 </span>
+                        <span style={{ color: "#10b981", fontWeight: 600 }}>{rec.impactKo}</span>
+                      </div>
+                      <div style={{
+                        background: "#0ea5e922",
+                        border: "1px solid #0ea5e933",
+                        borderRadius: 6,
+                        padding: "4px 10px",
+                        fontSize: 11
+                      }}>
+                        <span style={{ color: "#64748b" }}>제품 </span>
+                        <span style={{ color: "#0ea5e9", fontWeight: 600 }}>{rec.productKo}</span>
+                      </div>
+                      <div style={{
+                        background: "#f59e0b22",
+                        border: "1px solid #f59e0b33",
+                        borderRadius: 6,
+                        padding: "4px 10px",
+                        fontSize: 11
+                      }}>
+                        <span style={{ color: "#64748b" }}>용량 </span>
+                        <span style={{ color: "#f59e0b", fontWeight: 600, fontFamily: "'DM Mono', monospace" }}>{rec.volume}</span>
+                      </div>
+                    </div>
+
+                    <div style={{
+                      background: "#0a0a1a",
+                      borderRadius: 8,
+                      padding: "10px 12px",
+                      fontSize: 12,
+                      color: "#94a3b8",
+                      lineHeight: 1.7,
+                      borderLeft: "2px solid #334155"
+                    }}>
+                      {rec.rationaleKo}
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Section: Research Basis */}
+            <div style={{
+              background: "#0a1628",
+              border: "1px solid #1e3a5f",
+              borderRadius: 14,
+              padding: "18px",
+              marginBottom: 16
+            }}>
+              <div style={{ marginBottom: 14 }}>
+                <span style={{ fontSize: 10, color: "#60a5fa", letterSpacing: "0.1em", fontWeight: 700 }}>
+                  06 · 관련 연구 근거
+                </span>
+              </div>
+              {result.researchInsights.map((r, i) => (
+                <div key={i} style={{
+                  display: "flex",
+                  gap: 12,
+                  marginBottom: 12,
+                  paddingBottom: 12,
+                  borderBottom: i < result.researchInsights.length - 1 ? "1px solid #1e293b" : "none"
+                }}>
+                  <div style={{
+                    background: "#0d1f38",
+                    border: "1px solid #1e3a5f",
+                    borderRadius: 6,
+                    padding: "4px 8px",
+                    fontSize: 9,
+                    color: "#60a5fa",
+                    whiteSpace: "nowrap",
+                    height: "fit-content",
+                    marginTop: 2
+                  }}>{r.study}</div>
+                  <div>
+                    <div style={{ color: "#cbd5e1", fontSize: 12, marginBottom: 4 }}>{r.findingKo}</div>
+                    <div style={{ color: "#64748b", fontSize: 11, lineHeight: 1.5 }}>{r.relevance}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Disclaimer */}
+            <div style={{
+              background: "#0a0f1a",
+              border: "1px solid #1e293b",
+              borderRadius: 12,
+              padding: "14px 16px",
+              marginBottom: 16
+            }}>
+              <div style={{ color: "#475569", fontSize: 10, lineHeight: 1.7 }}>
+                <span style={{ color: "#334155", fontWeight: 600 }}>⚠ 의료 면책 조항 </span>
+                본 분석 결과는 AI 기반 보조 도구이며, 의료적 진단이나 치료 권고가 아닙니다. 
+                모든 시술 결정은 반드시 전문 의료인의 직접 진찰 및 판단에 따라야 합니다. 
+                본 리포트는 의료상담의 참고자료로만 활용되어야 합니다.
+              </div>
+            </div>
+
+            {/* Action Buttons */}
+            <div style={{ display: "flex", gap: 10 }}>
+              <button
+                onClick={reset}
+                style={{
+                  flex: 1,
+                  background: "#0d1f38",
+                  border: "1px solid #1e3a5f",
+                  color: "#60a5fa",
+                  borderRadius: 10,
+                  padding: "14px",
+                  cursor: "pointer",
+                  fontSize: 14,
+                  fontWeight: 600
+                }}
+              >← 새 분석</button>
+              <button
+                onClick={() => window.print()}
+                style={{
+                  flex: 2,
+                  background: "linear-gradient(135deg, #0ea5e9, #6366f1)",
+                  border: "none",
+                  color: "white",
+                  borderRadius: 10,
+                  padding: "14px",
+                  cursor: "pointer",
+                  fontSize: 14,
+                  fontWeight: 700
+                }}
+              >🖨 리포트 인쇄 / 저장</button>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
