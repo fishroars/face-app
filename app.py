@@ -7,8 +7,9 @@ from PIL import Image
 import math
 import hashlib
 import pandas as pd
+import streamlit.components.v1 as components # 인쇄 버튼용 부품 추가
 
-# --- 1. 기본 설정 및 모바일 최적화 CSS ---
+# --- 1. 기본 설정 및 모바일/인쇄 최적화 CSS ---
 st.set_page_config(page_title="Biometric VIP Report", layout="centered", initial_sidebar_state="collapsed")
 
 custom_css = """
@@ -23,6 +24,15 @@ custom_css = """
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stTabs [data-baseweb="tab"] { font-weight: bold; padding: 10px 15px; }
     .guide-box { background-color: #e8f0fe; border-left: 4px solid #4285f4; padding: 10px; margin-bottom: 15px; font-size: 13px; color: #333; }
+    
+    /* 🖨️ 인쇄 시 불필요한 버튼과 카메라 화면 숨기기 */
+    @media print {
+        header, .stCamera, .stFileUploader, button, .guide-box, iframe { display: none !important; }
+        @page { size: A4 portrait; margin: 15mm; }
+        body { background-color: white !important; -webkit-print-color-adjust: exact !important; print-color-adjust: exact !important; }
+        * { color: black !important; }
+        .highlight-box { border: 1px solid #ccc !important; border-left: 4px solid #000 !important; }
+    }
 </style>
 """
 st.markdown(custom_css, unsafe_allow_html=True)
@@ -58,7 +68,6 @@ def analyze_face(image_array):
     l_pupil, r_pupil = landmarks[468], landmarks[473]
     pronasale = landmarks[1]
 
-    # [수정됨] 허용 오차를 8도까지 대폭 완화! (사람이 편하게 찍을 수 있는 각도)
     dx = (r_pupil.x - l_pupil.x) * w
     dy = (r_pupil.y - l_pupil.y) * h
     tilt_angle = abs(math.degrees(math.atan2(dy, dx)))
@@ -111,7 +120,7 @@ if not st.session_state["access_granted"]:
     
     if st.button("로그인", use_container_width=True):
         if '여기에_구글시트_CSV_링크를_붙여넣으세요' in SHEET_URL or 'docs.google.com' not in SHEET_URL:
-            st.error("⚠️ 코드 31번째 줄의 SHEET_URL을 구글 시트 주소로 변경해주세요!")
+            st.error("⚠️ 코드 35번째 줄의 SHEET_URL을 구글 시트 주소로 변경해주세요!")
         elif not user_email or not user_pw:
             st.warning("⚠️ 이메일과 비밀번호를 모두 입력해 주세요.")
         else:
@@ -143,7 +152,6 @@ with col2:
 
 st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
 
-# [수정됨] 카메라 위에 사용자가 보기 편한 가이드라인 안내 박스 추가
 st.markdown("""
 <div class="guide-box">
     📸 <b>촬영 가이드 (AI 자동 보정 켜짐)</b><br>
@@ -167,6 +175,16 @@ if image_source is not None:
     if error_msg:
         st.error(error_msg)
     elif metrics:
+        
+        # 🖨️ [새로 추가됨] 인쇄 버튼!
+        components.html("""
+        <div style="text-align: right; margin-bottom: 10px;">
+            <button onclick="window.print()" style="padding: 10px 20px; background-color: #111; color: white; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; box-shadow: 0px 4px 6px rgba(0,0,0,0.1);">
+                🖨️ A4 리포트 인쇄 / PDF 저장
+            </button>
+        </div>
+        """, height=55)
+
         tab1, tab2, tab3 = st.tabs(["📊 구조 분석", "🎯 심리 프로필", "📝 종합 평가"])
         
         with tab1:
