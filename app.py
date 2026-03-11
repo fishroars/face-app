@@ -6,7 +6,6 @@ import plotly.graph_objects as go
 from PIL import Image
 import math
 import hashlib
-from datetime import datetime
 import pandas as pd
 
 # --- 1. 기본 설정 및 모바일 최적화 CSS ---
@@ -23,6 +22,7 @@ custom_css = """
     .login-box { border: 1px solid #ddd; padding: 20px; border-radius: 10px; background-color: #fafafa; margin-top: 20px; }
     .stTabs [data-baseweb="tab-list"] { gap: 8px; }
     .stTabs [data-baseweb="tab"] { font-weight: bold; padding: 10px 15px; }
+    .guide-box { background-color: #e8f0fe; border-left: 4px solid #4285f4; padding: 10px; margin-bottom: 15px; font-size: 13px; color: #333; }
 </style>
 """
 st.markdown(custom_css, unsafe_allow_html=True)
@@ -49,7 +49,7 @@ def analyze_face(image_array):
     results = face_mesh.process(image_array)
     
     if not results.multi_face_landmarks:
-        return None, None, "❌ 얼굴을 인식하지 못했습니다. 밝은 곳에서 정면을 찍어주세요."
+        return None, None, "❌ 얼굴을 인식하지 못했습니다. 머리카락이 눈이나 턱을 가리지 않게 해주세요."
         
     landmarks = results.multi_face_landmarks[0].landmark
     l_zygoma, r_zygoma = landmarks[234], landmarks[454]
@@ -58,12 +58,13 @@ def analyze_face(image_array):
     l_pupil, r_pupil = landmarks[468], landmarks[473]
     pronasale = landmarks[1]
 
+    # [수정됨] 허용 오차를 8도까지 대폭 완화! (사람이 편하게 찍을 수 있는 각도)
     dx = (r_pupil.x - l_pupil.x) * w
     dy = (r_pupil.y - l_pupil.y) * h
     tilt_angle = abs(math.degrees(math.atan2(dy, dx)))
     
-    if tilt_angle > 3.0: 
-        return None, None, f"⚠️ 고개가 {tilt_angle:.1f}도 기울어졌습니다. 스마트폰 수평을 맞추고 다시 찍어주세요."
+    if tilt_angle > 8.0: 
+        return None, None, f"⚠️ 고개가 너무 많이 꺾였습니다 ({tilt_angle:.1f}도). 갸우뚱하지 않게 정면을 봐주세요!"
 
     face_width = calc_3d_dist(l_zygoma, r_zygoma, w, h)
     face_height = calc_3d_dist(trichion, gnathion, w, h)
@@ -105,13 +106,12 @@ if not st.session_state["access_granted"]:
     st.markdown('<div class="report-header"><p class="report-title">🔒 CLINICAL AI LOGIN</p></div>', unsafe_allow_html=True)
     
     st.markdown('<div class="login-box">', unsafe_allow_html=True)
-    st.write("안면 생체 인식 시스템에 오신 것을 환영합니다.")
     user_email = st.text_input("📧 이메일 (Email):", placeholder="example@email.com")
     user_pw = st.text_input("🔑 비밀번호 (Password):", type="password", placeholder="비밀번호 입력")
     
     if st.button("로그인", use_container_width=True):
         if '여기에_구글시트_CSV_링크를_붙여넣으세요' in SHEET_URL or 'docs.google.com' not in SHEET_URL:
-            st.error("⚠️ 코드 34번째 줄의 SHEET_URL을 본인의 구글 시트 주소로 변경해주세요!")
+            st.error("⚠️ 코드 31번째 줄의 SHEET_URL을 구글 시트 주소로 변경해주세요!")
         elif not user_email or not user_pw:
             st.warning("⚠️ 이메일과 비밀번호를 모두 입력해 주세요.")
         else:
@@ -122,14 +122,13 @@ if not st.session_state["access_granted"]:
                 match = df_users[(df_users['Email'] == str(user_email).strip()) & (df_users['Password'] == str(user_pw).strip())]
                 
                 if not match.empty:
-                    user_name = match.iloc[0]['Name']
                     st.session_state["access_granted"] = True
-                    st.session_state["user_name"] = user_name
+                    st.session_state["user_name"] = match.iloc[0]['Name']
                     st.rerun()
                 else:
                     st.error("❌ 이메일 또는 비밀번호가 일치하지 않습니다.")
             else:
-                st.error("❌ 구글 시트를 불러올 수 없습니다. 링크를 확인해 주세요.")
+                st.error("❌ 구글 시트를 불러올 수 없습니다.")
     st.markdown('</div>', unsafe_allow_html=True)
     st.stop()
 
@@ -144,7 +143,17 @@ with col2:
 
 st.markdown("<hr style='margin: 10px 0;'>", unsafe_allow_html=True)
 
-camera_photo = st.camera_input("📷 모바일 정면 카메라 (얼굴 수평 유지)")
+# [수정됨] 카메라 위에 사용자가 보기 편한 가이드라인 안내 박스 추가
+st.markdown("""
+<div class="guide-box">
+    📸 <b>촬영 가이드 (AI 자동 보정 켜짐)</b><br>
+    • 스마트폰 렌즈가 눈높이와 <b>일직선</b>이 되게 들어주세요.<br>
+    • 카메라 화면의 <b>중앙에 얼굴이 가득 차도록</b> 맞춰주세요.<br>
+    • 약간 삐뚤어져도 3D AI가 알아서 보정합니다! 편하게 찍으세요.
+</div>
+""", unsafe_allow_html=True)
+
+camera_photo = st.camera_input("📷 모바일 정면 카메라")
 uploaded_file = st.file_uploader("📂 갤러리에서 업로드", type=["jpg", "jpeg", "png"])
 image_source = camera_photo if camera_photo else uploaded_file
 
@@ -183,15 +192,15 @@ if image_source is not None:
             
             eval_html = "<div class='highlight-box'><ul>"
             if comp > 70 and neo < 50:
-                eval_html += "<li><b>[Professional]:</b> 성숙한 비율과 높은 대칭성이 결합되어 고도의 <b>'유능함(Competence)'</b>을 발산합니다. 이성적이고 일 처리가 뛰어난 전문가의 인상입니다.</li>"
+                eval_html += "<li><b>[Professional]:</b> 성숙한 비율과 대칭성이 결합되어 고도의 <b>'유능함(Competence)'</b>을 발산합니다. 일 처리가 뛰어난 전문가의 인상입니다.</li>"
             elif neo > 70 and trt > 60:
-                eval_html += "<li><b>[Approachable]:</b> 유형성숙(Neoteny) 비율이 높아 타인의 경계심을 즉각적으로 낮추는 <b>'친화적 아우라'</b>가 돋보입니다. 대중에게 다가가기 쉬운 호감형입니다.</li>"
+                eval_html += "<li><b>[Approachable]:</b> 타인의 경계심을 즉각적으로 낮추는 <b>'친화적 아우라'</b>가 돋보입니다. 대중에게 다가가기 쉬운 호감형입니다.</li>"
             else:
-                eval_html += "<li><b>[Balanced]:</b> 극단적이지 않고 안정적인 비율을 지녔습니다. 튀지 않고 편안한 <b>'신뢰감(Trustworthiness)'</b>을 주는 조화로운 인상입니다.</li>"
+                eval_html += "<li><b>[Balanced]:</b> 안정적인 비율을 지녔습니다. 튀지 않고 편안한 <b>'신뢰감(Trustworthiness)'</b>을 주는 조화로운 인상입니다.</li>"
                 
             if dom > 65:
-                eval_html += "<li><b>[Authoritative]:</b> 광대뼈와 하악각이 발달하여 공간을 장악하는 <b>'카리스마(Dominance)'</b>가 있습니다. 추진력과 결단력이 필요한 상황에 매우 유리합니다.</li>"
+                eval_html += "<li><b>[Authoritative]:</b> 하악각이 발달하여 공간을 장악하는 <b>'카리스마(Dominance)'</b>가 있습니다. 추진력과 결단력이 필요한 상황에 유리합니다.</li>"
             else:
-                eval_html += "<li><b>[Egalitarian]:</b> 갸름한 윤곽이 지배성을 낮추어, 위압적이기보다 <b>수평적이고 민주적인 소통</b>을 선호하는 사람으로 인식됩니다. 훌륭한 중재자입니다.</li>"
+                eval_html += "<li><b>[Egalitarian]:</b> 위압적이기보다 <b>수평적이고 민주적인 소통</b>을 선호하는 사람으로 인식됩니다. 훌륭한 중재자입니다.</li>"
             eval_html += "</ul></div>"
             st.markdown(eval_html, unsafe_allow_html=True)
